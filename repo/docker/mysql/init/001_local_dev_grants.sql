@@ -1,0 +1,5 @@
+GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, DROP
+ON `metroops`.*
+TO 'metroops_app'@'%';
+
+FLUSH PRIVILEGES;

@@ -1,0 +1,60 @@
+{
+  "trajectory": [
+    {
+      "phase": "plan",
+      "objective": "Fix two high-severity refresh-governance issues",
+      "todos": [
+        "Inspect refresh cadence and risk counting flow in middleware and heartbeat caller",
+        "Implement per-screen heartbeat cadence isolation",
+        "Ensure rejected cadence attempts are still counted for excessive-refresh risk",
+        "Add/update tests and run targeted + full suites"
+      ]
+    },
+    {
+      "phase": "analyze",
+      "files_reviewed": [
+        "app/security_middleware.py",
+        "app/static/app.js",
+        "app/routes_ops.py",
+        "API_tests/test_ui_and_risk.py"
+      ],
+      "findings": [
+        "Heartbeat cadence key used endpoint-canonical identity, not validated screen identity",
+        "Cadence early-return happened before rolling attempt threshold enforcement"
+      ]
+    },
+    {
+      "phase": "implement",
+      "changes": [
+        {
+          "file": "app/security_middleware.py",
+          "details": [
+            "Added validated heartbeat screen parsing and normalization",
+            "Set heartbeat cadence key to heartbeat:<screen>",
+            "Counted refresh attempts before cadence return path",
+            "Evaluated rolling risk threshold independently from cadence rejection"
+          ]
+        },
+        {
+          "file": "API_tests/test_ui_and_risk.py",
+          "details": [
+            "Updated heartbeat screen expectations for per-screen isolation",
+            "Updated direct cadence row reference from heartbeat to heartbeat:dashboard",
+            "Added test for risk-event generation from cadence-rejected attempts"
+          ]
+        }
+      ]
+    },
+    {
+      "phase": "verify",
+      "commands": [
+        "pytest API_tests/test_ui_and_risk.py -k \"excessive_refresh_generates_risk_event or strict_ten_second_refresh_cap or refresh_governance_isolated_by_screen_query or cadence_rejected_heartbeat_attempts_still_trigger_excessive_refresh_risk\"",
+        "bash ./run_tests.sh"
+      ],
+      "results": {
+        "targeted": "4 passed",
+        "full_suite": "84 passed"
+      }
+    }
+  ]
+}

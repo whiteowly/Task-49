@@ -4,7 +4,7 @@ import secrets
 import sqlite3
 import html
 from decimal import Decimal, ROUND_HALF_UP
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
 
@@ -61,6 +61,7 @@ KEY_PATH = Path(os.environ.get("METROOPS_KEY_PATH", str(DATA_DIR / "secret.key")
 
 ATTACHMENTS_DIR.mkdir(parents=True, exist_ok=True)
 MIN_PASSWORD_LENGTH = 12
+UTC = timezone.utc
 
 
 def utc_now():
@@ -87,11 +88,15 @@ def load_fernet():
 
 def create_app():
     app = Flask(__name__, template_folder="templates", static_folder="static")
-    runtime_env, tls_disable = resolve_tls_disable_policy(os.environ.get("DISABLE_TLS_ENFORCEMENT", "0"))
+    runtime_env, tls_disable = resolve_tls_disable_policy(
+        os.environ.get("DISABLE_TLS_ENFORCEMENT", "0")
+    )
     development_mode = runtime_env in {"development", "dev", "local", "test", "testing"}
     configured_secret = os.environ.get("FLASK_SECRET")
     if not development_mode and not configured_secret:
-        raise RuntimeError("FLASK_SECRET must be explicitly set in non-development runtime")
+        raise RuntimeError(
+            "FLASK_SECRET must be explicitly set in non-development runtime"
+        )
     app.config["SECRET_KEY"] = configured_secret or secrets.token_hex(32)
     app.config["RUNTIME_ENV"] = runtime_env
     app.config["MAX_CONTENT_LENGTH"] = 20 * 1024 * 1024
@@ -104,13 +109,19 @@ def create_app():
         )
         session_cookie_secure = False
     if not development_mode and not session_cookie_secure:
-        raise RuntimeError("SESSION_COOKIE_SECURE must be enabled in non-development runtime")
+        raise RuntimeError(
+            "SESSION_COOKIE_SECURE must be enabled in non-development runtime"
+        )
     app.config["SESSION_COOKIE_SECURE"] = session_cookie_secure
     app.config["SESSION_COOKIE_HTTPONLY"] = True
-    app.config["SESSION_COOKIE_SAMESITE"] = os.environ.get("SESSION_COOKIE_SAMESITE", "Lax")
+    app.config["SESSION_COOKIE_SAMESITE"] = os.environ.get(
+        "SESSION_COOKIE_SAMESITE", "Lax"
+    )
     app.config["TLS_REQUIRED"] = True
     app.config["DISABLE_TLS_ENFORCEMENT"] = tls_disable
-    gateway_token, gateway_token_state = validated_gateway_token(os.environ.get("METROOPS_GATEWAY_TOKEN"))
+    gateway_token, gateway_token_state = validated_gateway_token(
+        os.environ.get("METROOPS_GATEWAY_TOKEN")
+    )
     app.config["GATEWAY_TOKEN"] = gateway_token
     app.config["CSRF_PROTECT"] = True
     app.fernet = load_fernet()
@@ -155,12 +166,21 @@ def create_app():
         user_id = session.get("user_id")
         if not user_id:
             return None
-        return get_db().execute(
-            "SELECT id,username,role,depot_assignment FROM users WHERE id=?", (user_id,)
-        ).fetchone()
+        return (
+            get_db()
+            .execute(
+                "SELECT id,username,role,depot_assignment FROM users WHERE id=?",
+                (user_id,),
+            )
+            .fetchone()
+        )
 
     def user_permissions(role):
-        rows = get_db().execute("SELECT permission FROM permissions WHERE role=?", (role,)).fetchall()
+        rows = (
+            get_db()
+            .execute("SELECT permission FROM permissions WHERE role=?", (role,))
+            .fetchall()
+        )
         return {r["permission"] for r in rows}
 
     def login_required(fn):
@@ -232,7 +252,11 @@ def create_app():
         return note_row["depot_scope"] == user["depot_assignment"]
 
     def can_edit_note(user, note_row):
-        return bool(user and can_view_note(user, note_row) and (is_note_manager(user) or note_row["owner_id"] == user["id"]))
+        return bool(
+            user
+            and can_view_note(user, note_row)
+            and (is_note_manager(user) or note_row["owner_id"] == user["id"])
+        )
 
     def ensure_kiosk_user_id(db):
         row = db.execute("SELECT id FROM users WHERE username='kiosk_rider'").fetchone()
@@ -245,7 +269,13 @@ def create_app():
         now = to_iso(utc_now())
         cursor = db.execute(
             "INSERT INTO users (username,password_hash,role,depot_assignment,created_at) VALUES (?,?,?,?,?)",
-            ("kiosk_rider", generate_password_hash(kiosk_password), "employee", "Kiosk", now),
+            (
+                "kiosk_rider",
+                generate_password_hash(kiosk_password),
+                "employee",
+                "Kiosk",
+                now,
+            ),
         )
         db.commit()
         return cursor.lastrowid
@@ -316,7 +346,9 @@ def create_app():
         return max(0, departure["total_seats"] - held - booked)
 
     def get_int_config(db, key, default_value, min_value=1, max_value=3650):
-        row = db.execute("SELECT value FROM system_config WHERE key=?", (key,)).fetchone()
+        row = db.execute(
+            "SELECT value FROM system_config WHERE key=?", (key,)
+        ).fetchone()
         raw = row["value"] if row else str(default_value)
         try:
             value = int(raw)
@@ -326,10 +358,18 @@ def create_app():
 
     def booking_rule_values(db):
         return {
-            "booking_min_advance_hours": get_int_config(db, "booking_min_advance_hours", 2, 1, 168),
-            "booking_max_horizon_days": get_int_config(db, "booking_max_horizon_days", 30, 1, 365),
-            "commuter_bundle_min_days": get_int_config(db, "commuter_bundle_min_days", 3, 1, 30),
-            "seat_hold_timeout_minutes": get_int_config(db, "seat_hold_timeout_minutes", 8, 1, 120),
+            "booking_min_advance_hours": get_int_config(
+                db, "booking_min_advance_hours", 2, 1, 168
+            ),
+            "booking_max_horizon_days": get_int_config(
+                db, "booking_max_horizon_days", 30, 1, 365
+            ),
+            "commuter_bundle_min_days": get_int_config(
+                db, "commuter_bundle_min_days", 3, 1, 30
+            ),
+            "seat_hold_timeout_minutes": get_int_config(
+                db, "seat_hold_timeout_minutes", 8, 1, 120
+            ),
         }
 
     def enforce_booking_window(db, departure_time):
@@ -338,7 +378,10 @@ def create_app():
         max_days = rules["booking_max_horizon_days"]
         now = utc_now()
         if departure_time < now + timedelta(hours=min_hours):
-            return False, f"Booking must be made at least {min_hours} hours before departure"
+            return (
+                False,
+                f"Booking must be made at least {min_hours} hours before departure",
+            )
         if departure_time > now + timedelta(days=max_days):
             return False, f"Booking cannot be made more than {max_days} days in advance"
         return True, "ok"
@@ -371,13 +414,17 @@ def create_app():
         db = get_db()
         db.execute("BEGIN EXCLUSIVE")
         try:
-            departure = db.execute("SELECT * FROM departures WHERE id=?", (departure_id,)).fetchone()
+            departure = db.execute(
+                "SELECT * FROM departures WHERE id=?", (departure_id,)
+            ).fetchone()
             if not departure:
                 db.rollback()
                 return None, {"error": "Invalid departure"}, 404
 
             rules = booking_rule_values(db)
-            valid, message = enforce_booking_window(db, from_iso(departure["departure_time"]))
+            valid, message = enforce_booking_window(
+                db, from_iso(departure["departure_time"])
+            )
             if not valid:
                 db.rollback()
                 return None, {"error": message}, 422
@@ -385,7 +432,13 @@ def create_app():
             min_bundle_days = rules["commuter_bundle_min_days"]
             if product_type == "commuter_bundle" and bundle_days < min_bundle_days:
                 db.rollback()
-                return None, {"error": f"Commuter bundle requires minimum {min_bundle_days} days"}, 422
+                return (
+                    None,
+                    {
+                        "error": f"Commuter bundle requires minimum {min_bundle_days} days"
+                    },
+                    422,
+                )
 
             seats = available_seats(db, departure_id)
             if seats_requested <= 0 or seats_requested > seats:
@@ -397,10 +450,16 @@ def create_app():
                     seats_requested,
                     seats,
                 )
-                return None, {"error": "Insufficient seats", "seats_remaining": seats}, 409
+                return (
+                    None,
+                    {"error": "Insufficient seats", "seats_remaining": seats},
+                    409,
+                )
 
             hold_nonce = secrets.token_urlsafe(16)
-            expires_at = to_iso(utc_now() + timedelta(minutes=rules["seat_hold_timeout_minutes"]))
+            expires_at = to_iso(
+                utc_now() + timedelta(minutes=rules["seat_hold_timeout_minutes"])
+            )
             db.execute(
                 "INSERT INTO seat_holds (departure_id,user_id,seats,kiosk_session_id,expires_at,status,nonce,created_at) VALUES (?,?,?,?,?,?,?,?)",
                 (
@@ -448,13 +507,17 @@ def create_app():
                 db.rollback()
                 return None, {"error": "Hold expired or invalid"}, 410
 
-            departure = db.execute("SELECT * FROM departures WHERE id=?", (hold["departure_id"],)).fetchone()
+            departure = db.execute(
+                "SELECT * FROM departures WHERE id=?", (hold["departure_id"],)
+            ).fetchone()
             if available_seats(db, hold["departure_id"]) < hold["seats"]:
                 db.rollback()
                 return None, {"error": "Inventory conflict"}, 409
 
             total = price_for_departure(db, departure, hold["seats"])
-            encrypted_contact = app.fernet.encrypt(contact.encode("utf-8")) if contact else None
+            encrypted_contact = (
+                app.fernet.encrypt(contact.encode("utf-8")) if contact else None
+            )
             db.execute(
                 "INSERT INTO bookings (departure_id,user_id,seats,total_price,status,kiosk_session_id,contact_encrypted,nonce_used,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
                 (
@@ -469,7 +532,9 @@ def create_app():
                     to_iso(utc_now()),
                 ),
             )
-            db.execute("UPDATE seat_holds SET status='converted' WHERE id=?", (hold["id"],))
+            db.execute(
+                "UPDATE seat_holds SET status='converted' WHERE id=?", (hold["id"],)
+            )
             db.execute(
                 "INSERT INTO analytics_events (user_id,event_type,created_at,metadata) VALUES (?,?,?,?)",
                 (
@@ -488,13 +553,25 @@ def create_app():
         except Exception:
             db.rollback()
             raise
-        return {"ok": True, "total_price": total, "kiosk_session_id": hold["kiosk_session_id"]}, None, 200
+        return (
+            {
+                "ok": True,
+                "total_price": total,
+                "kiosk_session_id": hold["kiosk_session_id"],
+            },
+            None,
+            200,
+        )
 
     def assert_nonce(user_id, action, nonce):
-        row = get_db().execute(
-            "SELECT id,expires_at,used_at FROM sessions_nonce WHERE user_id=? AND action=? AND nonce=?",
-            (user_id, action, nonce),
-        ).fetchone()
+        row = (
+            get_db()
+            .execute(
+                "SELECT id,expires_at,used_at FROM sessions_nonce WHERE user_id=? AND action=? AND nonce=?",
+                (user_id, action, nonce),
+            )
+            .fetchone()
+        )
         if not row:
             return False, "Invalid nonce"
         if row["used_at"]:
@@ -585,7 +662,9 @@ app.init_db()
 
 if __name__ == "__main__":
     debug_mode = os.environ.get("FLASK_DEBUG", "0") == "1"
-    use_http = app.config.get("DISABLE_TLS_ENFORCEMENT", False) and app.config.get("RUNTIME_ENV") in {
+    use_http = app.config.get("DISABLE_TLS_ENFORCEMENT", False) and app.config.get(
+        "RUNTIME_ENV"
+    ) in {
         "development",
         "dev",
         "local",
@@ -596,3 +675,4 @@ if __name__ == "__main__":
         app.run(host="0.0.0.0", port=5000, debug=debug_mode)
     else:
         app.run(host="0.0.0.0", port=5000, debug=debug_mode, ssl_context="adhoc")
+UTC = timezone.utc

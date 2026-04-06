@@ -1,9 +1,15 @@
 import pytest
 import sqlite3
 import importlib
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
-from app.config import resolve_tls_disable_policy, runtime_env_mode, validated_gateway_token
+UTC = timezone.utc
+
+from app.config import (
+    resolve_tls_disable_policy,
+    runtime_env_mode,
+    validated_gateway_token,
+)
 from app.db_bootstrap import initialize_database
 
 
@@ -44,8 +50,14 @@ def test_resolve_tls_disable_policy_allows_development_override(monkeypatch):
 def test_non_dev_bootstrap_requires_admin_password(tmp_path, monkeypatch):
     monkeypatch.setenv("METROOPS_RUNTIME_ENV", "production")
     monkeypatch.delenv("METROOPS_BOOTSTRAP_ADMIN_PASSWORD", raising=False)
-    with pytest.raises(RuntimeError, match="requires METROOPS_BOOTSTRAP_ADMIN_PASSWORD"):
-        initialize_database(tmp_path / "prod_bootstrap.db", lambda: datetime.now(UTC), lambda dt: dt.isoformat())
+    with pytest.raises(
+        RuntimeError, match="requires METROOPS_BOOTSTRAP_ADMIN_PASSWORD"
+    ):
+        initialize_database(
+            tmp_path / "prod_bootstrap.db",
+            lambda: datetime.now(UTC),
+            lambda dt: dt.isoformat(),
+        )
 
 
 def test_non_dev_bootstrap_uses_env_admin_credentials(tmp_path, monkeypatch):
@@ -58,7 +70,9 @@ def test_non_dev_bootstrap_uses_env_admin_credentials(tmp_path, monkeypatch):
 
     db = sqlite3.connect(db_path)
     rows = db.execute("SELECT username, role FROM users ORDER BY id").fetchall()
-    profile = db.execute("SELECT value FROM system_config WHERE key='bootstrap_profile'").fetchone()[0]
+    profile = db.execute(
+        "SELECT value FROM system_config WHERE key='bootstrap_profile'"
+    ).fetchone()[0]
     db.close()
 
     assert rows == [("ops_admin", "admin")]
@@ -73,7 +87,9 @@ def test_non_dev_rejects_existing_dev_default_bootstrap_profile(tmp_path, monkey
     monkeypatch.setenv("METROOPS_RUNTIME_ENV", "production")
     monkeypatch.setenv("METROOPS_BOOTSTRAP_ADMIN_PASSWORD", "ProdBootstrapPass!55")
     with pytest.raises(RuntimeError, match="Development default credentials detected"):
-        initialize_database(db_path, lambda: datetime.now(UTC), lambda dt: dt.isoformat())
+        initialize_database(
+            db_path, lambda: datetime.now(UTC), lambda dt: dt.isoformat()
+        )
 
 
 def test_non_dev_create_app_requires_explicit_flask_secret(tmp_path, monkeypatch):

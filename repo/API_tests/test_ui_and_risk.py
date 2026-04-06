@@ -2,7 +2,9 @@ import importlib
 import logging
 import os
 from io import BytesIO
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+UTC = timezone.utc
 
 import pytest
 
@@ -97,11 +99,29 @@ def test_arrival_board_threshold_edges(tmp_path):
     with app.app_context():
         app.get_db().execute(
             "INSERT INTO vehicle_pings (vehicle_id,route_id,stop_sequence,lat,lon,speed_mph,ping_time,source) VALUES (?,?,?,?,?,?,?,?)",
-            ("EDGE-IN", 1, 1, 0.0, 0.0, 20.0, (now - timedelta(minutes=2) + timedelta(seconds=1)).isoformat(), "csv"),
+            (
+                "EDGE-IN",
+                1,
+                1,
+                0.0,
+                0.0,
+                20.0,
+                (now - timedelta(minutes=2) + timedelta(seconds=1)).isoformat(),
+                "csv",
+            ),
         )
         app.get_db().execute(
             "INSERT INTO vehicle_pings (vehicle_id,route_id,stop_sequence,lat,lon,speed_mph,ping_time,source) VALUES (?,?,?,?,?,?,?,?)",
-            ("EDGE-OUT", 2, 1, 0.0, 0.0, 20.0, (now - timedelta(minutes=2) - timedelta(seconds=1)).isoformat(), "csv"),
+            (
+                "EDGE-OUT",
+                2,
+                1,
+                0.0,
+                0.0,
+                20.0,
+                (now - timedelta(minutes=2) - timedelta(seconds=1)).isoformat(),
+                "csv",
+            ),
         )
         app.get_db().commit()
 
@@ -124,7 +144,11 @@ def test_excessive_refresh_generates_risk_event(tmp_path):
         with app.app_context():
             app.get_db().execute(
                 "UPDATE refresh_cadence SET last_seen=? WHERE actor_key=? AND screen=?",
-                ((datetime.now(UTC) - timedelta(seconds=11)).isoformat(), "user:1", "heartbeat"),
+                (
+                    (datetime.now(UTC) - timedelta(seconds=11)).isoformat(),
+                    "user:1",
+                    "heartbeat:dashboard",
+                ),
             )
             app.get_db().commit()
 
@@ -132,13 +156,17 @@ def test_excessive_refresh_generates_risk_event(tmp_path):
     assert throttled.status_code == 429
 
     with app.app_context():
-        count = app.get_db().execute(
-            "SELECT COUNT(*) FROM risk_events WHERE event_type='excessive_refresh'"
-        ).fetchone()[0]
+        count = (
+            app.get_db()
+            .execute(
+                "SELECT COUNT(*) FROM risk_events WHERE event_type='excessive_refresh'"
+            )
+            .fetchone()[0]
+        )
         assert count >= 1
 
     other_screen = client.get("/api/heartbeat?screen=kiosk")
-    assert other_screen.status_code == 429
+    assert other_screen.status_code == 200
 
 
 def test_strict_ten_second_refresh_cap(tmp_path):
@@ -150,14 +178,37 @@ def test_strict_ten_second_refresh_cap(tmp_path):
     assert second.status_code == 429
 
 
-def test_refresh_governance_not_bypassable_by_rotating_screen_query(tmp_path):
+def test_refresh_governance_isolated_by_screen_query(tmp_path):
     client, _app = build_client(tmp_path)
     login_agent(client)
 
     first = client.get("/api/heartbeat?screen=alpha")
     assert first.status_code == 200
     second = client.get("/api/heartbeat?screen=beta")
-    assert second.status_code == 429
+    assert second.status_code == 200
+
+
+def test_cadence_rejected_heartbeat_attempts_still_trigger_excessive_refresh_risk(
+    tmp_path,
+):
+    client, app = build_client(tmp_path)
+    login_agent(client)
+
+    first = client.get("/api/heartbeat?screen=rapid")
+    assert first.status_code == 200
+    for _ in range(31):
+        blocked = client.get("/api/heartbeat?screen=rapid")
+        assert blocked.status_code == 429
+
+    with app.app_context():
+        count = (
+            app.get_db()
+            .execute(
+                "SELECT COUNT(*) FROM risk_events WHERE event_type='excessive_refresh' AND details LIKE 'screen=heartbeat:rapid,%'"
+            )
+            .fetchone()[0]
+        )
+        assert count >= 1
 
 
 def test_refresh_governance_applies_to_arrival_endpoint(tmp_path):
@@ -171,12 +222,20 @@ def test_refresh_governance_applies_to_arrival_endpoint(tmp_path):
 def test_seat_availability_query_endpoint_and_refresh_cap(tmp_path):
     client, app = build_client(tmp_path)
     with app.app_context():
-        dep_id = app.get_db().execute("SELECT id FROM departures ORDER BY id LIMIT 1").fetchone()[0]
+        dep_id = (
+            app.get_db()
+            .execute("SELECT id FROM departures ORDER BY id LIMIT 1")
+            .fetchone()[0]
+        )
 
-    first = client.get(f"/api/seat-availability?departure_id={dep_id}&screen=dashboard-seat-availability")
+    first = client.get(
+        f"/api/seat-availability?departure_id={dep_id}&screen=dashboard-seat-availability"
+    )
     assert first.status_code == 200
     assert b"Seats remaining" in first.data
-    second = client.get(f"/api/seat-availability?departure_id={dep_id}&screen=dashboard-seat-availability")
+    second = client.get(
+        f"/api/seat-availability?departure_id={dep_id}&screen=dashboard-seat-availability"
+    )
     assert second.status_code == 429
 
 
@@ -185,7 +244,7 @@ def test_dashboard_contains_htmx_seat_refresh(tmp_path):
     login_agent(client)
     page = client.get("/dashboard")
     assert page.status_code == 200
-    assert b"hx-trigger=\"load, every 10s, change from:#departure-select\"" in page.data
+    assert b'hx-trigger="load, every 10s, change from:#departure-select"' in page.data
     assert b"screen=dashboard-seat-availability" in page.data
 
 
@@ -218,7 +277,7 @@ def test_dashboard_social_actions_ui_and_wiring_present(tmp_path):
     assert b'id="social-actions-panel"' in page.data
     assert b'id="social-target-user-id"' in page.data
     assert b'id="social-relation"' in page.data
-    assert b'data-social-action' in page.data
+    assert b"data-social-action" in page.data
     assert b'id="social-action-status"' in page.data
 
     js = client.get("/static/app.js")
@@ -240,11 +299,15 @@ def test_profile_social_actions_ui_state_and_mutual_follow_visibility(tmp_path):
     assert b"Follow" in page_before.data
     assert b"Mutual follow required" in page_before.data
 
-    follow = authed_post(client, "/api/social/action", json={"target_user_id": 2, "relation": "follow"})
+    follow = authed_post(
+        client, "/api/social/action", json={"target_user_id": 2, "relation": "follow"}
+    )
     assert follow.status_code == 200
 
     login_supervisor(client)
-    follow_back = authed_post(client, "/api/social/action", json={"target_user_id": 1, "relation": "follow"})
+    follow_back = authed_post(
+        client, "/api/social/action", json={"target_user_id": 1, "relation": "follow"}
+    )
     assert follow_back.status_code == 200
 
     login_agent(client)
@@ -263,17 +326,27 @@ def test_profile_social_actions_ui_state_and_mutual_follow_visibility(tmp_path):
 def test_profile_social_actions_unauthorized_and_validation_failures(tmp_path):
     client, _app = build_client(tmp_path)
 
-    unauth = client.post("/api/social/action", json={"target_user_id": 2, "relation": "follow"})
+    unauth = client.post(
+        "/api/social/action", json={"target_user_id": 2, "relation": "follow"}
+    )
     assert unauth.status_code == 302
 
     login_agent(client)
-    invalid_relation = authed_post(client, "/api/social/action", json={"target_user_id": 2, "relation": "INVALID"})
+    invalid_relation = authed_post(
+        client, "/api/social/action", json={"target_user_id": 2, "relation": "INVALID"}
+    )
     assert invalid_relation.status_code == 422
 
-    missing_relation = authed_post(client, "/api/social/action", json={"target_user_id": 2})
+    missing_relation = authed_post(
+        client, "/api/social/action", json={"target_user_id": 2}
+    )
     assert missing_relation.status_code == 422
 
-    missing_target = authed_post(client, "/api/social/action", json={"target_user_id": 999999, "relation": "follow"})
+    missing_target = authed_post(
+        client,
+        "/api/social/action",
+        json={"target_user_id": 999999, "relation": "follow"},
+    )
     assert missing_target.status_code == 404
 
 
@@ -281,15 +354,23 @@ def test_profile_social_duplicate_click_protection_idempotent_follow(tmp_path):
     client, app = build_client(tmp_path)
     login_agent(client)
 
-    first = authed_post(client, "/api/social/action", json={"target_user_id": 2, "relation": "follow"})
-    second = authed_post(client, "/api/social/action", json={"target_user_id": 2, "relation": "follow"})
+    first = authed_post(
+        client, "/api/social/action", json={"target_user_id": 2, "relation": "follow"}
+    )
+    second = authed_post(
+        client, "/api/social/action", json={"target_user_id": 2, "relation": "follow"}
+    )
     assert first.status_code == 200
     assert second.status_code == 200
 
     with app.app_context():
-        count = app.get_db().execute(
-            "SELECT COUNT(*) FROM relationships WHERE user_a=1 AND user_b=2 AND relation='follow'"
-        ).fetchone()[0]
+        count = (
+            app.get_db()
+            .execute(
+                "SELECT COUNT(*) FROM relationships WHERE user_a=1 AND user_b=2 AND relation='follow'"
+            )
+            .fetchone()[0]
+        )
         assert count == 1
 
 
@@ -324,11 +405,19 @@ def test_depot_mutation_requires_permission(tmp_path):
     assert denied.status_code == 403
 
     login_supervisor(client)
-    nonce_for_freeze = authed_post(client, "/api/security/nonce", data={"action": "inventory_adjust"}).get_json()["nonce"]
-    allowed = authed_post(client, "/api/depot/bins/1/freeze", data={"frozen": "1", "request_nonce": nonce_for_freeze})
+    nonce_for_freeze = authed_post(
+        client, "/api/security/nonce", data={"action": "inventory_adjust"}
+    ).get_json()["nonce"]
+    allowed = authed_post(
+        client,
+        "/api/depot/bins/1/freeze",
+        data={"frozen": "1", "request_nonce": nonce_for_freeze},
+    )
     assert allowed.status_code == 200
 
-    nonce = authed_post(client, "/api/security/nonce", data={"action": "inventory_adjust"}).get_json()["nonce"]
+    nonce = authed_post(
+        client, "/api/security/nonce", data={"action": "inventory_adjust"}
+    ).get_json()["nonce"]
     allocate = authed_post(
         client,
         "/api/depot/allocate",
@@ -342,10 +431,18 @@ def test_depot_mutation_requires_permission(tmp_path):
     )
     assert allocate.status_code == 409
 
-    freeze_back_nonce = authed_post(client, "/api/security/nonce", data={"action": "inventory_adjust"}).get_json()["nonce"]
-    freeze_back = authed_post(client, "/api/depot/bins/1/freeze", data={"frozen": "0", "request_nonce": freeze_back_nonce})
+    freeze_back_nonce = authed_post(
+        client, "/api/security/nonce", data={"action": "inventory_adjust"}
+    ).get_json()["nonce"]
+    freeze_back = authed_post(
+        client,
+        "/api/depot/bins/1/freeze",
+        data={"frozen": "0", "request_nonce": freeze_back_nonce},
+    )
     assert freeze_back.status_code == 200
-    nonce2 = authed_post(client, "/api/security/nonce", data={"action": "inventory_adjust"}).get_json()["nonce"]
+    nonce2 = authed_post(
+        client, "/api/security/nonce", data={"action": "inventory_adjust"}
+    ).get_json()["nonce"]
     frozen_then_allocate = authed_post(
         client,
         "/api/depot/allocate",
@@ -359,8 +456,14 @@ def test_depot_mutation_requires_permission(tmp_path):
     )
     assert frozen_then_allocate.status_code == 200
 
-    missing_bin_nonce = authed_post(client, "/api/security/nonce", data={"action": "inventory_adjust"}).get_json()["nonce"]
-    missing_bin = authed_post(client, "/api/depot/bins/999999/freeze", data={"frozen": "1", "request_nonce": missing_bin_nonce})
+    missing_bin_nonce = authed_post(
+        client, "/api/security/nonce", data={"action": "inventory_adjust"}
+    ).get_json()["nonce"]
+    missing_bin = authed_post(
+        client,
+        "/api/depot/bins/999999/freeze",
+        data={"frozen": "1", "request_nonce": missing_bin_nonce},
+    )
     assert missing_bin.status_code == 404
 
 
@@ -376,7 +479,12 @@ def test_privileged_endpoints_deny_employee_role(tmp_path):
     denied_admin = authed_post(
         client,
         "/admin/users",
-        json={"username": "x", "password": "LongEnoughPass!123", "role": "employee", "depot_assignment": "Main"},
+        json={
+            "username": "x",
+            "password": "LongEnoughPass!123",
+            "role": "employee",
+            "depot_assignment": "Main",
+        },
     )
     assert denied_admin.status_code == 403
 
@@ -390,11 +498,17 @@ def test_depot_hierarchy_management_crud_and_validation(tmp_path):
     payload = hierarchy.get_json()
     assert "warehouses" in payload and "zones" in payload and "bins" in payload
 
-    created_wh = authed_post(client, "/api/depot/warehouses", json={"name": "Overflow Depot"})
+    created_wh = authed_post(
+        client, "/api/depot/warehouses", json={"name": "Overflow Depot"}
+    )
     assert created_wh.status_code == 201
     warehouse_id = created_wh.get_json()["id"]
 
-    created_zone = authed_post(client, "/api/depot/zones", json={"warehouse_id": warehouse_id, "name": "Zone X"})
+    created_zone = authed_post(
+        client,
+        "/api/depot/zones",
+        json={"warehouse_id": warehouse_id, "name": "Zone X"},
+    )
     assert created_zone.status_code == 201
     zone_id = created_zone.get_json()["id"]
 
@@ -427,9 +541,15 @@ def test_depot_hierarchy_management_crud_and_validation(tmp_path):
     assert created_bin.status_code == 201
     bin_id = created_bin.get_json()["id"]
 
-    meta_bad = authed_post(client, f"/api/depot/bins/{bin_id}/metadata", json={"status": "bad"})
+    meta_bad = authed_post(
+        client, f"/api/depot/bins/{bin_id}/metadata", json={"status": "bad"}
+    )
     assert meta_bad.status_code == 422
-    meta_ok = authed_post(client, f"/api/depot/bins/{bin_id}/metadata", json={"status": "available", "bin_type": "cold"})
+    meta_ok = authed_post(
+        client,
+        f"/api/depot/bins/{bin_id}/metadata",
+        json={"status": "available", "bin_type": "cold"},
+    )
     assert meta_ok.status_code == 200
 
     manage_page = client.get("/depot/manage")
@@ -455,13 +575,19 @@ def test_operator_workflow_freeze_and_allocate_paths(tmp_path):
     client, app = build_client(tmp_path)
     login_supervisor(client)
 
-    missing_nonce = authed_post(client, "/api/depot/bins/1/freeze", data={"frozen": "1"})
+    missing_nonce = authed_post(
+        client, "/api/depot/bins/1/freeze", data={"frozen": "1"}
+    )
     assert missing_nonce.status_code == 409
 
-    invalid_freeze = authed_post(client, "/api/depot/bins/1/freeze", data={"frozen": "bad"})
+    invalid_freeze = authed_post(
+        client, "/api/depot/bins/1/freeze", data={"frozen": "bad"}
+    )
     assert invalid_freeze.status_code == 409
 
-    nonce_for_freeze = authed_post(client, "/api/security/nonce", data={"action": "inventory_adjust"}).get_json()["nonce"]
+    nonce_for_freeze = authed_post(
+        client, "/api/security/nonce", data={"action": "inventory_adjust"}
+    ).get_json()["nonce"]
     invalid_freeze_with_nonce = authed_post(
         client,
         "/api/depot/bins/1/freeze",
@@ -469,18 +595,36 @@ def test_operator_workflow_freeze_and_allocate_paths(tmp_path):
     )
     assert invalid_freeze_with_nonce.status_code == 422
 
-    freeze_nonce = authed_post(client, "/api/security/nonce", data={"action": "inventory_adjust"}).get_json()["nonce"]
-    frozen = authed_post(client, "/api/depot/bins/1/freeze", data={"frozen": "1", "request_nonce": freeze_nonce})
+    freeze_nonce = authed_post(
+        client, "/api/security/nonce", data={"action": "inventory_adjust"}
+    ).get_json()["nonce"]
+    frozen = authed_post(
+        client,
+        "/api/depot/bins/1/freeze",
+        data={"frozen": "1", "request_nonce": freeze_nonce},
+    )
     assert frozen.status_code == 200
 
-    replay = authed_post(client, "/api/depot/bins/1/freeze", data={"frozen": "0", "request_nonce": freeze_nonce})
+    replay = authed_post(
+        client,
+        "/api/depot/bins/1/freeze",
+        data={"frozen": "0", "request_nonce": freeze_nonce},
+    )
     assert replay.status_code == 409
 
-    booking_nonce = authed_post(client, "/api/security/nonce", data={"action": "booking_confirm"}).get_json()["nonce"]
-    cross_action = authed_post(client, "/api/depot/bins/1/freeze", data={"frozen": "0", "request_nonce": booking_nonce})
+    booking_nonce = authed_post(
+        client, "/api/security/nonce", data={"action": "booking_confirm"}
+    ).get_json()["nonce"]
+    cross_action = authed_post(
+        client,
+        "/api/depot/bins/1/freeze",
+        data={"frozen": "0", "request_nonce": booking_nonce},
+    )
     assert cross_action.status_code == 409
 
-    nonce = authed_post(client, "/api/security/nonce", data={"action": "inventory_adjust"}).get_json()["nonce"]
+    nonce = authed_post(
+        client, "/api/security/nonce", data={"action": "inventory_adjust"}
+    ).get_json()["nonce"]
     blocked_allocate = authed_post(
         client,
         "/api/depot/allocate",
@@ -494,11 +638,19 @@ def test_operator_workflow_freeze_and_allocate_paths(tmp_path):
     )
     assert blocked_allocate.status_code == 409
 
-    thaw_nonce = authed_post(client, "/api/security/nonce", data={"action": "inventory_adjust"}).get_json()["nonce"]
-    unfrozen = authed_post(client, "/api/depot/bins/1/freeze", data={"frozen": "0", "request_nonce": thaw_nonce})
+    thaw_nonce = authed_post(
+        client, "/api/security/nonce", data={"action": "inventory_adjust"}
+    ).get_json()["nonce"]
+    unfrozen = authed_post(
+        client,
+        "/api/depot/bins/1/freeze",
+        data={"frozen": "0", "request_nonce": thaw_nonce},
+    )
     assert unfrozen.status_code == 200
 
-    nonce_ok = authed_post(client, "/api/security/nonce", data={"action": "inventory_adjust"}).get_json()["nonce"]
+    nonce_ok = authed_post(
+        client, "/api/security/nonce", data={"action": "inventory_adjust"}
+    ).get_json()["nonce"]
     allocated = authed_post(
         client,
         "/api/depot/allocate",
@@ -513,9 +665,13 @@ def test_operator_workflow_freeze_and_allocate_paths(tmp_path):
     assert allocated.status_code == 200
 
     with app.app_context():
-        found = app.get_db().execute(
-            "SELECT COUNT(*) FROM inventory_items WHERE bin_id=1 AND item_name='WorkflowCrate'"
-        ).fetchone()[0]
+        found = (
+            app.get_db()
+            .execute(
+                "SELECT COUNT(*) FROM inventory_items WHERE bin_id=1 AND item_name='WorkflowCrate'"
+            )
+            .fetchone()[0]
+        )
         assert found >= 1
 
 
@@ -533,19 +689,33 @@ def test_note_object_level_authorization(tmp_path):
     denied = authed_post(
         client,
         "/api/notes",
-        json={"id": note_id, "title": "Hijack", "content_md": "B", "note_type": "training"},
+        json={
+            "id": note_id,
+            "title": "Hijack",
+            "content_md": "B",
+            "note_type": "training",
+        },
     )
     assert denied.status_code == 403
 
     with app.app_context():
-        title = app.get_db().execute("SELECT title FROM notes WHERE id=?", (note_id,)).fetchone()[0]
+        title = (
+            app.get_db()
+            .execute("SELECT title FROM notes WHERE id=?", (note_id,))
+            .fetchone()[0]
+        )
         assert title == "Agent Note"
 
     login_hr(client)
     allowed = authed_post(
         client,
         "/api/notes",
-        json={"id": note_id, "title": "HR Override", "content_md": "C", "note_type": "training"},
+        json={
+            "id": note_id,
+            "title": "HR Override",
+            "content_md": "C",
+            "note_type": "training",
+        },
     )
     assert allowed.status_code == 200
 
@@ -554,7 +724,11 @@ def test_kiosk_booking_hold_and_confirm(tmp_path):
     client, app = build_client(tmp_path)
 
     with app.app_context():
-        dep_id = app.get_db().execute("SELECT id FROM departures ORDER BY id LIMIT 1").fetchone()[0]
+        dep_id = (
+            app.get_db()
+            .execute("SELECT id FROM departures ORDER BY id LIMIT 1")
+            .fetchone()[0]
+        )
         app.get_db().execute(
             "UPDATE departures SET departure_time=? WHERE id=?",
             ((datetime.now(UTC) + timedelta(hours=3)).isoformat(), dep_id),
@@ -593,7 +767,10 @@ def test_kiosk_booking_hold_and_confirm(tmp_path):
 
     with app.app_context():
         db = app.get_db()
-        hold_row = db.execute("SELECT kiosk_session_id,status FROM seat_holds WHERE nonce=?", (hold_nonce,)).fetchone()
+        hold_row = db.execute(
+            "SELECT kiosk_session_id,status FROM seat_holds WHERE nonce=?",
+            (hold_nonce,),
+        ).fetchone()
         booking_row = db.execute(
             "SELECT kiosk_session_id FROM bookings WHERE user_id=(SELECT id FROM users WHERE username='kiosk_rider') ORDER BY id DESC LIMIT 1"
         ).fetchone()
@@ -610,7 +787,11 @@ def test_kiosk_session_id_fallback_generated_and_propagated(tmp_path):
     client, app = build_client(tmp_path)
 
     with app.app_context():
-        dep_id = app.get_db().execute("SELECT id FROM departures ORDER BY id LIMIT 1").fetchone()[0]
+        dep_id = (
+            app.get_db()
+            .execute("SELECT id FROM departures ORDER BY id LIMIT 1")
+            .fetchone()[0]
+        )
         app.get_db().execute(
             "UPDATE departures SET departure_time=? WHERE id=?",
             ((datetime.now(UTC) + timedelta(hours=3)).isoformat(), dep_id),
@@ -619,7 +800,12 @@ def test_kiosk_session_id_fallback_generated_and_propagated(tmp_path):
 
     hold = client.post(
         "/api/kiosk/bookings/hold",
-        json={"departure_id": dep_id, "seats": 1, "product_type": "single", "bundle_days": 1},
+        json={
+            "departure_id": dep_id,
+            "seats": 1,
+            "product_type": "single",
+            "bundle_days": 1,
+        },
     )
     assert hold.status_code == 200
     payload = hold.get_json()
@@ -642,10 +828,14 @@ def test_kiosk_session_id_fallback_generated_and_propagated(tmp_path):
     assert confirm.get_json()["kiosk_session_id"] == generated_session
 
     with app.app_context():
-        booking_row = app.get_db().execute(
-            "SELECT kiosk_session_id FROM bookings WHERE nonce_used=?",
-            (nonce.get_json()["nonce"],),
-        ).fetchone()
+        booking_row = (
+            app.get_db()
+            .execute(
+                "SELECT kiosk_session_id FROM bookings WHERE nonce_used=?",
+                (nonce.get_json()["nonce"],),
+            )
+            .fetchone()
+        )
         assert booking_row["kiosk_session_id"] == generated_session
 
 
@@ -656,16 +846,30 @@ def test_notes_depot_scope_isolation(tmp_path):
     create_local = authed_post(
         client,
         "/api/notes",
-        json={"title": "Main Depot SOP", "content_md": "Local", "note_type": "training"},
+        json={
+            "title": "Main Depot SOP",
+            "content_md": "Local",
+            "note_type": "training",
+        },
     )
     assert create_local.status_code == 200
 
     with app.app_context():
         db = app.get_db()
-        owner_id = db.execute("SELECT id FROM users WHERE username='agent01'").fetchone()[0]
+        owner_id = db.execute(
+            "SELECT id FROM users WHERE username='agent01'"
+        ).fetchone()[0]
         db.execute(
             "INSERT INTO notes (title,content_md,note_type,owner_id,depot_scope,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
-            ("Remote Only Note", "Hidden", "incident", owner_id, "Remote Depot", "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"),
+            (
+                "Remote Only Note",
+                "Hidden",
+                "incident",
+                owner_id,
+                "Remote Depot",
+                "2026-01-01T00:00:00+00:00",
+                "2026-01-01T00:00:00+00:00",
+            ),
         )
         db.commit()
 
@@ -714,21 +918,36 @@ def test_admin_user_create_enforces_password_policy(tmp_path):
     weak = authed_post(
         client,
         "/admin/users",
-        json={"username": "weakuser", "password": "short", "role": "employee", "depot_assignment": "Depot A"},
+        json={
+            "username": "weakuser",
+            "password": "short",
+            "role": "employee",
+            "depot_assignment": "Depot A",
+        },
     )
     assert weak.status_code == 422
 
     strong = authed_post(
         client,
         "/admin/users",
-        json={"username": "newagent", "password": "LongEnoughPass!9", "role": "employee", "depot_assignment": "Depot A"},
+        json={
+            "username": "newagent",
+            "password": "LongEnoughPass!9",
+            "role": "employee",
+            "depot_assignment": "Depot A",
+        },
     )
     assert strong.status_code == 201
 
     duplicate = authed_post(
         client,
         "/admin/users",
-        json={"username": "newagent", "password": "LongEnoughPass!9", "role": "employee", "depot_assignment": "Depot A"},
+        json={
+            "username": "newagent",
+            "password": "LongEnoughPass!9",
+            "role": "employee",
+            "depot_assignment": "Depot A",
+        },
     )
     assert duplicate.status_code == 409
 
@@ -770,7 +989,9 @@ def test_session_cookie_security_flags_present_on_login(tmp_path):
             os.environ[key] = value
 
 
-def test_development_http_mode_forces_non_secure_cookie_and_session_continuity(tmp_path):
+def test_development_http_mode_forces_non_secure_cookie_and_session_continuity(
+    tmp_path,
+):
     previous = {
         "METROOPS_DB_PATH": os.environ.get("METROOPS_DB_PATH"),
         "METROOPS_KEY_PATH": os.environ.get("METROOPS_KEY_PATH"),
@@ -791,7 +1012,11 @@ def test_development_http_mode_forces_non_secure_cookie_and_session_continuity(t
         app.init_db()
         client = app.test_client()
 
-        login = client.post("/login", data={"username": "agent01", "password": "MetroOpsPass!01"}, follow_redirects=False)
+        login = client.post(
+            "/login",
+            data={"username": "agent01", "password": "MetroOpsPass!01"},
+            follow_redirects=False,
+        )
         assert login.status_code == 302
         cookie = login.headers.get("Set-Cookie", "")
         assert "Secure" not in cookie
@@ -822,18 +1047,32 @@ def test_tls_enforcement_login_lockout_experiment_and_analytics(tmp_path):
     no_tls = client.get("/login")
     assert no_tls.status_code == 426
 
-    secure = client.post("/login", data={"username": "agent01", "password": "wrong-password"}, base_url="https://localhost")
+    secure = client.post(
+        "/login",
+        data={"username": "agent01", "password": "wrong-password"},
+        base_url="https://localhost",
+    )
     assert secure.status_code == 302
     for _ in range(4):
-        resp = client.post("/login", data={"username": "agent01", "password": "wrong-password"}, base_url="https://localhost")
+        resp = client.post(
+            "/login",
+            data={"username": "agent01", "password": "wrong-password"},
+            base_url="https://localhost",
+        )
         assert resp.status_code == 302
-    locked = client.post("/login", data={"username": "agent01", "password": "MetroOpsPass!01"}, base_url="https://localhost")
+    locked = client.post(
+        "/login",
+        data={"username": "agent01", "password": "MetroOpsPass!01"},
+        base_url="https://localhost",
+    )
     assert locked.status_code == 302
 
     with app.app_context():
-        lockout_until = app.get_db().execute(
-            "SELECT lockout_until FROM users WHERE username='agent01'"
-        ).fetchone()[0]
+        lockout_until = (
+            app.get_db()
+            .execute("SELECT lockout_until FROM users WHERE username='agent01'")
+            .fetchone()[0]
+        )
         assert lockout_until is not None
         assert datetime.fromisoformat(lockout_until) > datetime.now(UTC)
 
@@ -844,7 +1083,9 @@ def test_tls_enforcement_login_lockout_experiment_and_analytics(tmp_path):
     )
     assert supervisor_login.status_code == 302
 
-    assign = client.get("/api/experiments/assign/suggested-times", base_url="https://localhost")
+    assign = client.get(
+        "/api/experiments/assign/suggested-times", base_url="https://localhost"
+    )
     assert assign.status_code == 200
     payload = assign.get_json()
     assert payload["variant"] in ("A", "B")
@@ -853,10 +1094,22 @@ def test_tls_enforcement_login_lockout_experiment_and_analytics(tmp_path):
     with app.app_context():
         db = app.get_db()
         now = datetime.now(UTC).isoformat()
-        db.execute("INSERT INTO analytics_events (user_id,event_type,created_at,metadata) VALUES (?,?,?,?)", (2, "rec_impression", now, "{}"))
-        db.execute("INSERT INTO analytics_events (user_id,event_type,created_at,metadata) VALUES (?,?,?,?)", (2, "rec_click", now, "{}"))
-        db.execute("INSERT INTO analytics_events (user_id,event_type,created_at,metadata) VALUES (?,?,?,?)", (2, "booking_confirmed", now, "{}"))
-        db.execute("INSERT INTO ranking_samples (relevant,recommended,ndcg,covered,diverse,created_at) VALUES (?,?,?,?,?,?)", (1, 1, 0.9, 1, 1, now))
+        db.execute(
+            "INSERT INTO analytics_events (user_id,event_type,created_at,metadata) VALUES (?,?,?,?)",
+            (2, "rec_impression", now, "{}"),
+        )
+        db.execute(
+            "INSERT INTO analytics_events (user_id,event_type,created_at,metadata) VALUES (?,?,?,?)",
+            (2, "rec_click", now, "{}"),
+        )
+        db.execute(
+            "INSERT INTO analytics_events (user_id,event_type,created_at,metadata) VALUES (?,?,?,?)",
+            (2, "booking_confirmed", now, "{}"),
+        )
+        db.execute(
+            "INSERT INTO ranking_samples (relevant,recommended,ndcg,covered,diverse,created_at) VALUES (?,?,?,?,?,?)",
+            (1, 1, 0.9, 1, 1, now),
+        )
         db.commit()
 
     metrics = client.get("/analyst/metrics", base_url="https://localhost")
@@ -881,7 +1134,9 @@ def test_production_runtime_rejects_tls_disable_startup(tmp_path):
         os.environ["DISABLE_TLS_ENFORCEMENT"] = "1"
 
         module = importlib.import_module("app.app")
-        with pytest.raises(RuntimeError, match="allowed only in development/test/local"):
+        with pytest.raises(
+            RuntimeError, match="allowed only in development/test/local"
+        ):
             importlib.reload(module)
     finally:
         for key, value in previous.items():
@@ -939,7 +1194,12 @@ def test_experiment_assignment_population_near_5050(tmp_path):
             rows,
         )
         db.commit()
-        user_ids = [r[0] for r in db.execute("SELECT id FROM users WHERE username LIKE 'load_user_%' ORDER BY id").fetchall()]
+        user_ids = [
+            r[0]
+            for r in db.execute(
+                "SELECT id FROM users WHERE username LIKE 'load_user_%' ORDER BY id"
+            ).fetchall()
+        ]
 
     a_count = 0
     b_count = 0
@@ -970,7 +1230,12 @@ def test_experiment_control_update_requires_permission_and_writes_audit(tmp_path
     denied = authed_post(
         client,
         "/supervisor/experiments/1",
-        data={"enabled": "1", "label_a": "Fast", "label_b": "Stable", "split_a_percent": "70"},
+        data={
+            "enabled": "1",
+            "label_a": "Fast",
+            "label_b": "Stable",
+            "split_a_percent": "70",
+        },
     )
     assert denied.status_code == 403
 
@@ -990,7 +1255,9 @@ def test_experiment_control_update_requires_permission_and_writes_audit(tmp_path
 
     with app.app_context():
         db = app.get_db()
-        exp = db.execute("SELECT enabled,label_a,label_b,split_a_percent FROM experiments WHERE id=1").fetchone()
+        exp = db.execute(
+            "SELECT enabled,label_a,label_b,split_a_percent FROM experiments WHERE id=1"
+        ).fetchone()
         assert exp["enabled"] == 0
         assert exp["label_a"] == "Pilot A"
         assert exp["label_b"] == "Pilot B"
@@ -1019,7 +1286,11 @@ def test_experiment_rejects_non_50_split_policy_update(tmp_path):
     assert "fixed policy" in rejected.get_json()["error"]
 
     with app.app_context():
-        split = app.get_db().execute("SELECT split_a_percent FROM experiments WHERE id=1").fetchone()[0]
+        split = (
+            app.get_db()
+            .execute("SELECT split_a_percent FROM experiments WHERE id=1")
+            .fetchone()[0]
+        )
         assert split == 50
 
 
@@ -1030,7 +1301,7 @@ def test_experiment_ui_shows_fixed_split_policy(tmp_path):
     page = client.get("/supervisor/experiments")
     assert page.status_code == 200
     assert b"50% / B: 50% (fixed by policy)" in page.data
-    assert b"name=\"split_a_percent\"" not in page.data
+    assert b'name="split_a_percent"' not in page.data
 
 
 def test_experiment_assignment_policy_stays_near_5050(tmp_path):
@@ -1053,13 +1324,21 @@ def test_experiment_assignment_policy_stays_near_5050(tmp_path):
         db = app.get_db()
         now = datetime.now(UTC).isoformat()
         seed_hash = "pbkdf2:sha256:600000$seed$hash"
-        rows = [(f"split_user_{i}", seed_hash, "employee", "Main Depot", now) for i in range(1, 801)]
+        rows = [
+            (f"split_user_{i}", seed_hash, "employee", "Main Depot", now)
+            for i in range(1, 801)
+        ]
         db.executemany(
             "INSERT INTO users (username,password_hash,role,depot_assignment,created_at) VALUES (?,?,?,?,?)",
             rows,
         )
         db.commit()
-        user_ids = [r[0] for r in db.execute("SELECT id FROM users WHERE username LIKE 'split_user_%' ORDER BY id").fetchall()]
+        user_ids = [
+            r[0]
+            for r in db.execute(
+                "SELECT id FROM users WHERE username LIKE 'split_user_%' ORDER BY id"
+            ).fetchall()
+        ]
 
     a_count = 0
     b_count = 0
@@ -1110,9 +1389,13 @@ def test_recommendation_telemetry_event_writes_impression_and_click(tmp_path):
     assert click.status_code == 201
 
     with app.app_context():
-        rows = app.get_db().execute(
-            "SELECT event_type,widget_key,variant FROM analytics_events WHERE user_id=2 AND event_type IN ('rec_impression','rec_click') ORDER BY id"
-        ).fetchall()
+        rows = (
+            app.get_db()
+            .execute(
+                "SELECT event_type,widget_key,variant FROM analytics_events WHERE user_id=2 AND event_type IN ('rec_impression','rec_click') ORDER BY id"
+            )
+            .fetchall()
+        )
         assert len(rows) >= 2
         assert rows[-2]["event_type"] == "rec_impression"
         assert rows[-2]["widget_key"] == "suggested-times"
@@ -1200,9 +1483,13 @@ def test_anomaly_notes_features_social_and_masking(tmp_path):
     )
     assert upload.status_code == 200
     with app.app_context():
-        risk_count = app.get_db().execute(
-            "SELECT COUNT(*) FROM risk_events WHERE event_type='impossible_speed_jump'"
-        ).fetchone()[0]
+        risk_count = (
+            app.get_db()
+            .execute(
+                "SELECT COUNT(*) FROM risk_events WHERE event_type='impossible_speed_jump'"
+            )
+            .fetchone()[0]
+        )
         assert risk_count >= 1
 
     note_a = authed_post(
@@ -1214,7 +1501,11 @@ def test_anomaly_notes_features_social_and_masking(tmp_path):
             "note_type": "training",
         },
     ).get_json()["id"]
-    note_b = authed_post(client, "/api/notes", json={"title": "N2", "content_md": "two", "note_type": "incident"}).get_json()["id"]
+    note_b = authed_post(
+        client,
+        "/api/notes",
+        json={"title": "N2", "content_md": "two", "note_type": "incident"},
+    ).get_json()["id"]
 
     preview = client.get(f"/api/notes/{note_a}/render")
     assert preview.status_code == 200
@@ -1223,10 +1514,23 @@ def test_anomaly_notes_features_social_and_masking(tmp_path):
     assert "<script" not in html
     assert "javascript:" not in html
 
-    link = authed_post(client, "/api/notes/link", json={"from_note_id": note_a, "to_note_id": note_b, "link_type": "related"})
+    link = authed_post(
+        client,
+        "/api/notes/link",
+        json={"from_note_id": note_a, "to_note_id": note_b, "link_type": "related"},
+    )
     assert link.status_code == 200
 
-    upd = authed_post(client, "/api/notes", json={"id": note_a, "title": "N1-v2", "content_md": "two", "note_type": "training"})
+    upd = authed_post(
+        client,
+        "/api/notes",
+        json={
+            "id": note_a,
+            "title": "N1-v2",
+            "content_md": "two",
+            "note_type": "training",
+        },
+    )
     assert upd.status_code == 200
 
     versions = client.get(f"/api/notes/{note_a}/versions")
@@ -1248,26 +1552,42 @@ def test_anomaly_notes_features_social_and_masking(tmp_path):
 
     login_agent(client)
 
-    follow = authed_post(client, "/api/social/action", json={"target_user_id": 2, "relation": "follow"})
+    follow = authed_post(
+        client, "/api/social/action", json={"target_user_id": 2, "relation": "follow"}
+    )
     assert follow.status_code == 200
-    block = authed_post(client, "/api/social/action", json={"target_user_id": 2, "relation": "block"})
+    block = authed_post(
+        client, "/api/social/action", json={"target_user_id": 2, "relation": "block"}
+    )
     assert block.status_code == 200
-    favorite = authed_post(client, "/api/social/action", json={"target_user_id": 2, "relation": "favorite"})
+    favorite = authed_post(
+        client, "/api/social/action", json={"target_user_id": 2, "relation": "favorite"}
+    )
     assert favorite.status_code == 200
-    like = authed_post(client, "/api/social/action", json={"target_user_id": 2, "relation": "like"})
+    like = authed_post(
+        client, "/api/social/action", json={"target_user_id": 2, "relation": "like"}
+    )
     assert like.status_code == 200
-    report = authed_post(client, "/api/social/action", json={"target_user_id": 2, "relation": "report"})
+    report = authed_post(
+        client, "/api/social/action", json={"target_user_id": 2, "relation": "report"}
+    )
     assert report.status_code == 200
 
     with app.app_context():
-        rel_count = app.get_db().execute(
-            "SELECT COUNT(*) FROM relationships WHERE user_a=1 AND user_b=2 AND relation IN ('follow','block','favorite','like','report')"
-        ).fetchone()[0]
+        rel_count = (
+            app.get_db()
+            .execute(
+                "SELECT COUNT(*) FROM relationships WHERE user_a=1 AND user_b=2 AND relation IN ('follow','block','favorite','like','report')"
+            )
+            .fetchone()[0]
+        )
         assert rel_count == 5
 
     with app.app_context():
         encrypted = app.fernet.encrypt(b"FACE123456")
-        app.get_db().execute("UPDATE users SET face_identifier_encrypted=? WHERE id=?", (encrypted, 1))
+        app.get_db().execute(
+            "UPDATE users SET face_identifier_encrypted=? WHERE id=?", (encrypted, 1)
+        )
         app.get_db().execute(
             "INSERT OR IGNORE INTO relationships (user_a,user_b,relation,created_at) VALUES (?,?,?,?)",
             (2, 1, "follow", datetime.now(UTC).isoformat()),
@@ -1323,9 +1643,13 @@ def test_geospatial_implied_speed_anomaly_detection(tmp_path):
     )
     assert upload.status_code == 200
     with app.app_context():
-        rows = app.get_db().execute(
-            "SELECT COUNT(*) FROM risk_events WHERE event_type='impossible_speed_jump' AND details LIKE '%implied_mph=%'"
-        ).fetchone()[0]
+        rows = (
+            app.get_db()
+            .execute(
+                "SELECT COUNT(*) FROM risk_events WHERE event_type='impossible_speed_jump' AND details LIKE '%implied_mph=%'"
+            )
+            .fetchone()[0]
+        )
         assert rows >= 1
 
 
@@ -1347,9 +1671,13 @@ def test_gps_anomaly_threshold_not_triggered_under_85_mph(tmp_path):
     assert upload.status_code == 200
 
     with app.app_context():
-        rows = app.get_db().execute(
-            "SELECT COUNT(*) FROM risk_events WHERE event_type='impossible_speed_jump' AND details LIKE 'vehicle=V3%'"
-        ).fetchone()[0]
+        rows = (
+            app.get_db()
+            .execute(
+                "SELECT COUNT(*) FROM risk_events WHERE event_type='impossible_speed_jump' AND details LIKE 'vehicle=V3%'"
+            )
+            .fetchone()[0]
+        )
         assert rows == 0
 
 
@@ -1359,7 +1687,9 @@ def test_authenticated_html_routes_send_no_store_cache_headers(tmp_path):
 
     dashboard = client.get("/dashboard")
     assert dashboard.status_code == 200
-    assert dashboard.headers.get("Cache-Control") == "no-store, no-cache, must-revalidate"
+    assert (
+        dashboard.headers.get("Cache-Control") == "no-store, no-cache, must-revalidate"
+    )
     assert dashboard.headers.get("Pragma") == "no-cache"
     assert dashboard.headers.get("Expires") == "0"
 
@@ -1369,7 +1699,10 @@ def test_lan_gateway_ingestion_and_csrf_protection(tmp_path):
     client, app = build_client(tmp_path)
     login_agent(client)
 
-    missing_csrf = client.post("/api/notes", json={"title": "Should fail", "content_md": "x", "note_type": "training"})
+    missing_csrf = client.post(
+        "/api/notes",
+        json={"title": "Should fail", "content_md": "x", "note_type": "training"},
+    )
     assert missing_csrf.status_code == 403
 
     bad_gateway = client.post("/api/vehicle-pings/gateway", json={"pings": []})
@@ -1394,9 +1727,13 @@ def test_lan_gateway_ingestion_and_csrf_protection(tmp_path):
     )
     assert good_gateway.status_code == 200
     with app.app_context():
-        row = app.get_db().execute(
-            "SELECT source FROM vehicle_pings WHERE vehicle_id='GW-1' ORDER BY id DESC LIMIT 1"
-        ).fetchone()
+        row = (
+            app.get_db()
+            .execute(
+                "SELECT source FROM vehicle_pings WHERE vehicle_id='GW-1' ORDER BY id DESC LIMIT 1"
+            )
+            .fetchone()
+        )
         assert row is not None
         assert row["source"] == "lan_gateway"
 
@@ -1428,16 +1765,28 @@ def test_placeholder_gateway_token_disables_lan_ingestion(tmp_path, caplog):
 def test_kiosk_nonce_throttling_and_risk_event(tmp_path):
     client, app = build_client(tmp_path)
     for _ in range(30):
-        ok = client.post("/api/kiosk/security/nonce", data={"action": "booking_confirm"}, headers={"X-Kiosk-Actor": "abuse-nonce"})
+        ok = client.post(
+            "/api/kiosk/security/nonce",
+            data={"action": "booking_confirm"},
+            headers={"X-Kiosk-Actor": "abuse-nonce"},
+        )
         assert ok.status_code == 200
-    throttled = client.post("/api/kiosk/security/nonce", data={"action": "booking_confirm"}, headers={"X-Kiosk-Actor": "abuse-nonce"})
+    throttled = client.post(
+        "/api/kiosk/security/nonce",
+        data={"action": "booking_confirm"},
+        headers={"X-Kiosk-Actor": "abuse-nonce"},
+    )
     assert throttled.status_code == 429
     assert "retry_after_seconds" in throttled.get_json()
 
     with app.app_context():
-        count = app.get_db().execute(
-            "SELECT COUNT(*) FROM risk_events WHERE event_type='kiosk_abuse_throttle' AND details LIKE '%kiosk_nonce%'"
-        ).fetchone()[0]
+        count = (
+            app.get_db()
+            .execute(
+                "SELECT COUNT(*) FROM risk_events WHERE event_type='kiosk_abuse_throttle' AND details LIKE '%kiosk_nonce%'"
+            )
+            .fetchone()[0]
+        )
         assert count >= 1
 
 
@@ -1445,7 +1794,9 @@ def test_kiosk_hold_throttling_and_normal_flow_under_limit(tmp_path):
     client, app = build_client(tmp_path)
     with app.app_context():
         db = app.get_db()
-        dep_id = db.execute("SELECT id FROM departures ORDER BY id LIMIT 1").fetchone()[0]
+        dep_id = db.execute("SELECT id FROM departures ORDER BY id LIMIT 1").fetchone()[
+            0
+        ]
         db.execute(
             "UPDATE departures SET departure_time=?, total_seats=? WHERE id=?",
             ((datetime.now(UTC) + timedelta(hours=4)).isoformat(), 500, dep_id),
@@ -1454,7 +1805,12 @@ def test_kiosk_hold_throttling_and_normal_flow_under_limit(tmp_path):
 
     normal_hold = client.post(
         "/api/kiosk/bookings/hold",
-        json={"departure_id": dep_id, "seats": 1, "product_type": "single", "bundle_days": 1},
+        json={
+            "departure_id": dep_id,
+            "seats": 1,
+            "product_type": "single",
+            "bundle_days": 1,
+        },
         headers={"X-Kiosk-Actor": "normal-flow"},
     )
     assert normal_hold.status_code == 200
@@ -1462,22 +1818,36 @@ def test_kiosk_hold_throttling_and_normal_flow_under_limit(tmp_path):
     for _ in range(20):
         response = client.post(
             "/api/kiosk/bookings/hold",
-            json={"departure_id": dep_id, "seats": 1, "product_type": "single", "bundle_days": 1},
+            json={
+                "departure_id": dep_id,
+                "seats": 1,
+                "product_type": "single",
+                "bundle_days": 1,
+            },
             headers={"X-Kiosk-Actor": "abuse-hold"},
         )
         assert response.status_code == 200
 
     throttled = client.post(
         "/api/kiosk/bookings/hold",
-        json={"departure_id": dep_id, "seats": 1, "product_type": "single", "bundle_days": 1},
+        json={
+            "departure_id": dep_id,
+            "seats": 1,
+            "product_type": "single",
+            "bundle_days": 1,
+        },
         headers={"X-Kiosk-Actor": "abuse-hold"},
     )
     assert throttled.status_code == 429
 
     with app.app_context():
-        risk_count = app.get_db().execute(
-            "SELECT COUNT(*) FROM risk_events WHERE event_type='kiosk_abuse_throttle' AND details LIKE '%kiosk_hold%'"
-        ).fetchone()[0]
+        risk_count = (
+            app.get_db()
+            .execute(
+                "SELECT COUNT(*) FROM risk_events WHERE event_type='kiosk_abuse_throttle' AND details LIKE '%kiosk_hold%'"
+            )
+            .fetchone()[0]
+        )
         assert risk_count >= 1
 
 
@@ -1485,20 +1855,35 @@ def test_malformed_payloads_return_4xx_not_500(tmp_path):
     client, _app = build_client(tmp_path)
     login_supervisor(client)
 
-    missing_relation = authed_post(client, "/api/social/action", json={"target_user_id": 2})
+    missing_relation = authed_post(
+        client, "/api/social/action", json={"target_user_id": 2}
+    )
     assert missing_relation.status_code == 422
 
-    missing_target = authed_post(client, "/api/social/action", json={"target_user_id": 999999, "relation": "follow"})
+    missing_target = authed_post(
+        client,
+        "/api/social/action",
+        json={"target_user_id": 999999, "relation": "follow"},
+    )
     assert missing_target.status_code == 404
 
-    bad_relation = authed_post(client, "/api/social/action", json={"target_user_id": 2, "relation": "INVALID"})
+    bad_relation = authed_post(
+        client, "/api/social/action", json={"target_user_id": 2, "relation": "INVALID"}
+    )
     assert bad_relation.status_code == 422
 
-    nonce = authed_post(client, "/api/security/nonce", data={"action": "inventory_adjust"}).get_json()["nonce"]
+    nonce = authed_post(
+        client, "/api/security/nonce", data={"action": "inventory_adjust"}
+    ).get_json()["nonce"]
     bad_allocate = authed_post(
         client,
         "/api/depot/allocate",
-        json={"request_nonce": nonce, "bin_id": "bad", "volume_cuft": "x", "weight_lb": "y"},
+        json={
+            "request_nonce": nonce,
+            "bin_id": "bad",
+            "volume_cuft": "x",
+            "weight_lb": "y",
+        },
     )
     assert bad_allocate.status_code == 422
 
@@ -1507,16 +1892,44 @@ def test_note_link_semantics_require_incident_training_pairs(tmp_path):
     client, _app = build_client(tmp_path)
     login_agent(client)
 
-    t1 = authed_post(client, "/api/notes", json={"title": "T1", "content_md": "x", "note_type": "training"}).get_json()["id"]
-    t2 = authed_post(client, "/api/notes", json={"title": "T2", "content_md": "x", "note_type": "training"}).get_json()["id"]
-    i1 = authed_post(client, "/api/notes", json={"title": "I1", "content_md": "x", "note_type": "incident"}).get_json()["id"]
-    i2 = authed_post(client, "/api/notes", json={"title": "I2", "content_md": "x", "note_type": "incident"}).get_json()["id"]
+    t1 = authed_post(
+        client,
+        "/api/notes",
+        json={"title": "T1", "content_md": "x", "note_type": "training"},
+    ).get_json()["id"]
+    t2 = authed_post(
+        client,
+        "/api/notes",
+        json={"title": "T2", "content_md": "x", "note_type": "training"},
+    ).get_json()["id"]
+    i1 = authed_post(
+        client,
+        "/api/notes",
+        json={"title": "I1", "content_md": "x", "note_type": "incident"},
+    ).get_json()["id"]
+    i2 = authed_post(
+        client,
+        "/api/notes",
+        json={"title": "I2", "content_md": "x", "note_type": "incident"},
+    ).get_json()["id"]
 
-    tt = authed_post(client, "/api/notes/link", json={"from_note_id": t1, "to_note_id": t2, "link_type": "related"})
+    tt = authed_post(
+        client,
+        "/api/notes/link",
+        json={"from_note_id": t1, "to_note_id": t2, "link_type": "related"},
+    )
     assert tt.status_code == 422
-    ii = authed_post(client, "/api/notes/link", json={"from_note_id": i1, "to_note_id": i2, "link_type": "related"})
+    ii = authed_post(
+        client,
+        "/api/notes/link",
+        json={"from_note_id": i1, "to_note_id": i2, "link_type": "related"},
+    )
     assert ii.status_code == 422
-    ti = authed_post(client, "/api/notes/link", json={"from_note_id": t1, "to_note_id": i1, "link_type": "related"})
+    ti = authed_post(
+        client,
+        "/api/notes/link",
+        json={"from_note_id": t1, "to_note_id": i1, "link_type": "related"},
+    )
     assert ti.status_code == 200
 
 
@@ -1531,7 +1944,9 @@ def test_notes_rollup_requires_notes_read_permission(tmp_path):
     assert allowed.status_code == 200
 
     with app.app_context():
-        app.get_db().execute("DELETE FROM permissions WHERE role='employee' AND permission='notes:read'")
+        app.get_db().execute(
+            "DELETE FROM permissions WHERE role='employee' AND permission='notes:read'"
+        )
         app.get_db().commit()
 
     denied = client.get("/api/notes/rollup")
@@ -1543,17 +1958,25 @@ def test_nonce_cross_action_misuse_rejected(tmp_path):
     login_supervisor(client)
 
     with app.app_context():
-        dep_id = app.get_db().execute("SELECT id FROM departures ORDER BY id LIMIT 1").fetchone()[0]
+        dep_id = (
+            app.get_db()
+            .execute("SELECT id FROM departures ORDER BY id LIMIT 1")
+            .fetchone()[0]
+        )
         app.get_db().execute(
             "UPDATE departures SET departure_time=? WHERE id=?",
             ((datetime.now(UTC) + timedelta(hours=3)).isoformat(), dep_id),
         )
         app.get_db().commit()
 
-    hold = authed_post(client, "/api/bookings/hold", json={"departure_id": dep_id, "seats": 1})
+    hold = authed_post(
+        client, "/api/bookings/hold", json={"departure_id": dep_id, "seats": 1}
+    )
     assert hold.status_code == 200
 
-    valid_inventory_nonce = authed_post(client, "/api/security/nonce", data={"action": "inventory_adjust"}).get_json()["nonce"]
+    valid_inventory_nonce = authed_post(
+        client, "/api/security/nonce", data={"action": "inventory_adjust"}
+    ).get_json()["nonce"]
     valid_inventory_adjust = authed_post(
         client,
         "/api/depot/allocate",
@@ -1580,7 +2003,9 @@ def test_nonce_cross_action_misuse_rejected(tmp_path):
     )
     assert replay_inventory_nonce.status_code == 409
 
-    booking_nonce = authed_post(client, "/api/security/nonce", data={"action": "booking_confirm"}).get_json()["nonce"]
+    booking_nonce = authed_post(
+        client, "/api/security/nonce", data={"action": "booking_confirm"}
+    ).get_json()["nonce"]
     inventory_with_booking_nonce = authed_post(
         client,
         "/api/depot/allocate",
@@ -1594,7 +2019,9 @@ def test_nonce_cross_action_misuse_rejected(tmp_path):
     )
     assert inventory_with_booking_nonce.status_code == 409
 
-    inventory_nonce = authed_post(client, "/api/security/nonce", data={"action": "inventory_adjust"}).get_json()["nonce"]
+    inventory_nonce = authed_post(
+        client, "/api/security/nonce", data={"action": "inventory_adjust"}
+    ).get_json()["nonce"]
     booking_with_inventory_nonce = authed_post(
         client,
         "/api/bookings/confirm",
@@ -1637,11 +2064,17 @@ def test_booking_rule_config_is_db_backed_and_audited(tmp_path):
     assert b"Hold Seat (5 min)" in kiosk_after.data
 
     with app.app_context():
-        count = app.get_db().execute("SELECT COUNT(*) FROM config_audit_log").fetchone()[0]
+        count = (
+            app.get_db().execute("SELECT COUNT(*) FROM config_audit_log").fetchone()[0]
+        )
         assert count >= 4
 
     with app.app_context():
-        dep_id = app.get_db().execute("SELECT id FROM departures ORDER BY id LIMIT 1").fetchone()[0]
+        dep_id = (
+            app.get_db()
+            .execute("SELECT id FROM departures ORDER BY id LIMIT 1")
+            .fetchone()[0]
+        )
         app.get_db().execute(
             "UPDATE departures SET departure_time=? WHERE id=?",
             ((datetime.now(UTC) + timedelta(hours=3, minutes=5)).isoformat(), dep_id),
@@ -1651,19 +2084,30 @@ def test_booking_rule_config_is_db_backed_and_audited(tmp_path):
     bundle_reject = authed_post(
         client,
         "/api/bookings/hold",
-        json={"departure_id": dep_id, "seats": 1, "product_type": "commuter_bundle", "bundle_days": 3},
+        json={
+            "departure_id": dep_id,
+            "seats": 1,
+            "product_type": "commuter_bundle",
+            "bundle_days": 3,
+        },
     )
     assert bundle_reject.status_code == 422
     assert "minimum 4 days" in bundle_reject.get_json()["error"]
 
-    hold = authed_post(client, "/api/bookings/hold", json={"departure_id": dep_id, "seats": 1})
+    hold = authed_post(
+        client, "/api/bookings/hold", json={"departure_id": dep_id, "seats": 1}
+    )
     assert hold.status_code == 200
 
     with app.app_context():
-        expires_at = app.get_db().execute(
-            "SELECT expires_at FROM seat_holds WHERE nonce=?",
-            (hold.get_json()["hold_nonce"],),
-        ).fetchone()[0]
+        expires_at = (
+            app.get_db()
+            .execute(
+                "SELECT expires_at FROM seat_holds WHERE nonce=?",
+                (hold.get_json()["hold_nonce"],),
+            )
+            .fetchone()[0]
+        )
         delta = datetime.fromisoformat(expires_at) - datetime.now(UTC)
         assert 4 <= delta.total_seconds() / 60 <= 6
 
@@ -1678,10 +2122,16 @@ def test_auth_status_matrix_and_sensitive_field_non_leakage(tmp_path, caplog):
     forbidden = client.get("/api/config/booking-rules")
     assert forbidden.status_code == 403
 
-    not_found = authed_post(client, "/api/social/action", json={"target_user_id": 999999, "relation": "follow"})
+    not_found = authed_post(
+        client,
+        "/api/social/action",
+        json={"target_user_id": 999999, "relation": "follow"},
+    )
     assert not_found.status_code == 404
 
-    invalid = authed_post(client, "/api/social/action", json={"target_user_id": 2, "relation": "INVALID"})
+    invalid = authed_post(
+        client, "/api/social/action", json={"target_user_id": 2, "relation": "INVALID"}
+    )
     assert invalid.status_code == 422
 
     throttle_first = client.get("/api/heartbeat?screen=matrix")
@@ -1691,20 +2141,32 @@ def test_auth_status_matrix_and_sensitive_field_non_leakage(tmp_path, caplog):
 
     caplog.set_level(logging.INFO)
     with app.app_context():
-        dep_id = app.get_db().execute("SELECT id FROM departures ORDER BY id LIMIT 1").fetchone()[0]
+        dep_id = (
+            app.get_db()
+            .execute("SELECT id FROM departures ORDER BY id LIMIT 1")
+            .fetchone()[0]
+        )
         app.get_db().execute(
             "UPDATE departures SET departure_time=? WHERE id=?",
             ((datetime.now(UTC) + timedelta(hours=3)).isoformat(), dep_id),
         )
         app.get_db().commit()
 
-    hold = authed_post(client, "/api/bookings/hold", json={"departure_id": dep_id, "seats": 1})
-    nonce = authed_post(client, "/api/security/nonce", data={"action": "booking_confirm"}).get_json()["nonce"]
+    hold = authed_post(
+        client, "/api/bookings/hold", json={"departure_id": dep_id, "seats": 1}
+    )
+    nonce = authed_post(
+        client, "/api/security/nonce", data={"action": "booking_confirm"}
+    ).get_json()["nonce"]
     contact_secret = "private-contact@example.com"
     confirmed = authed_post(
         client,
         "/api/bookings/confirm",
-        json={"hold_nonce": hold.get_json()["hold_nonce"], "request_nonce": nonce, "contact": contact_secret},
+        json={
+            "hold_nonce": hold.get_json()["hold_nonce"],
+            "request_nonce": nonce,
+            "contact": contact_secret,
+        },
     )
     assert confirmed.status_code == 200
     body = confirmed.get_data(as_text=True)
@@ -1800,7 +2262,9 @@ def test_face_identifier_logging_uses_mask_only(tmp_path, caplog):
     raw_identifier = "FACE-SECRET-9988"
     with app.app_context():
         encrypted = app.fernet.encrypt(raw_identifier.encode("utf-8"))
-        app.get_db().execute("UPDATE users SET face_identifier_encrypted=? WHERE id=?", (encrypted, 1))
+        app.get_db().execute(
+            "UPDATE users SET face_identifier_encrypted=? WHERE id=?", (encrypted, 1)
+        )
         app.get_db().commit()
 
     response = client.get("/profiles/1")
@@ -1835,7 +2299,12 @@ def test_attachment_size_limit_and_unauthorized_matrix(tmp_path):
     admin_denied = authed_post(
         client,
         "/admin/users",
-        json={"username": "x", "password": "LongEnoughPass!9", "role": "employee", "depot_assignment": "A"},
+        json={
+            "username": "x",
+            "password": "LongEnoughPass!9",
+            "role": "employee",
+            "depot_assignment": "A",
+        },
     )
     assert admin_denied.status_code == 403
 
@@ -1846,7 +2315,9 @@ def test_attachment_size_limit_and_unauthorized_matrix(tmp_path):
 def test_blocked_profile_visibility_denied(tmp_path):
     client, _app = build_client(tmp_path)
     login_agent(client)
-    block = authed_post(client, "/api/social/action", json={"target_user_id": 2, "relation": "block"})
+    block = authed_post(
+        client, "/api/social/action", json={"target_user_id": 2, "relation": "block"}
+    )
     assert block.status_code == 200
 
     login_supervisor(client)

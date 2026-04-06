@@ -1,7 +1,9 @@
 import importlib
 import os
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+UTC = timezone.utc
 
 
 def build_client(tmp_path):
@@ -42,17 +44,23 @@ def test_booking_window_and_inventory_lock(tmp_path):
 
     with app.app_context():
         db = app.get_db()
-        dep_id = db.execute("SELECT id FROM departures ORDER BY id LIMIT 1").fetchone()[0]
+        dep_id = db.execute("SELECT id FROM departures ORDER BY id LIMIT 1").fetchone()[
+            0
+        ]
         db.execute(
             "UPDATE departures SET departure_time=?, total_seats=1 WHERE id=?",
             ((datetime.now(UTC) + timedelta(hours=3)).isoformat(), dep_id),
         )
         db.commit()
 
-    first_hold = auth_post(client, "/api/bookings/hold", json={"departure_id": dep_id, "seats": 1})
+    first_hold = auth_post(
+        client, "/api/bookings/hold", json={"departure_id": dep_id, "seats": 1}
+    )
     assert first_hold.status_code == 200
 
-    second_hold = auth_post(client, "/api/bookings/hold", json={"departure_id": dep_id, "seats": 1})
+    second_hold = auth_post(
+        client, "/api/bookings/hold", json={"departure_id": dep_id, "seats": 1}
+    )
     assert second_hold.status_code == 409
     assert second_hold.get_json()["error"] == "Insufficient seats"
 
@@ -64,7 +72,9 @@ def test_booking_window_and_inventory_lock(tmp_path):
         )
         db.commit()
 
-    out_of_window = auth_post(client, "/api/bookings/hold", json={"departure_id": dep_id, "seats": 1})
+    out_of_window = auth_post(
+        client, "/api/bookings/hold", json={"departure_id": dep_id, "seats": 1}
+    )
     assert out_of_window.status_code == 422
     assert "more than 30 days" in out_of_window.get_json()["error"]
 
@@ -76,7 +86,9 @@ def test_booking_window_and_inventory_lock(tmp_path):
         )
         db.commit()
 
-    too_soon = auth_post(client, "/api/bookings/hold", json={"departure_id": dep_id, "seats": 1})
+    too_soon = auth_post(
+        client, "/api/bookings/hold", json={"departure_id": dep_id, "seats": 1}
+    )
     assert too_soon.status_code == 422
     assert "at least 2 hours" in too_soon.get_json()["error"]
 
@@ -87,7 +99,9 @@ def test_booking_confirm_nonce_and_bundle_rule(tmp_path):
 
     with app.app_context():
         db = app.get_db()
-        dep_id = db.execute("SELECT id FROM departures ORDER BY id LIMIT 1").fetchone()[0]
+        dep_id = db.execute("SELECT id FROM departures ORDER BY id LIMIT 1").fetchone()[
+            0
+        ]
         db.execute(
             "UPDATE departures SET departure_time=? WHERE id=?",
             ((datetime.now(UTC) + timedelta(hours=4)).isoformat(), dep_id),
@@ -97,22 +111,38 @@ def test_booking_confirm_nonce_and_bundle_rule(tmp_path):
     invalid_bundle = auth_post(
         client,
         "/api/bookings/hold",
-        json={"departure_id": dep_id, "seats": 1, "product_type": "commuter_bundle", "bundle_days": 2},
+        json={
+            "departure_id": dep_id,
+            "seats": 1,
+            "product_type": "commuter_bundle",
+            "bundle_days": 2,
+        },
     )
     assert invalid_bundle.status_code == 422
 
     hold = auth_post(
         client,
         "/api/bookings/hold",
-        json={"departure_id": dep_id, "seats": 1, "product_type": "commuter_bundle", "bundle_days": 3},
+        json={
+            "departure_id": dep_id,
+            "seats": 1,
+            "product_type": "commuter_bundle",
+            "bundle_days": 3,
+        },
     )
     hold_json = hold.get_json()
-    nonce_res = auth_post(client, "/api/security/nonce", data={"action": "booking_confirm"})
+    nonce_res = auth_post(
+        client, "/api/security/nonce", data={"action": "booking_confirm"}
+    )
     nonce = nonce_res.get_json()["nonce"]
     confirm = auth_post(
         client,
         "/api/bookings/confirm",
-        json={"hold_nonce": hold_json["hold_nonce"], "request_nonce": nonce, "contact": "rider@example.com"},
+        json={
+            "hold_nonce": hold_json["hold_nonce"],
+            "request_nonce": nonce,
+            "contact": "rider@example.com",
+        },
     )
     assert confirm.status_code == 200
     assert confirm.get_json()["ok"] is True
@@ -120,7 +150,11 @@ def test_booking_confirm_nonce_and_bundle_rule(tmp_path):
     replay = auth_post(
         client,
         "/api/bookings/confirm",
-        json={"hold_nonce": hold_json["hold_nonce"], "request_nonce": nonce, "contact": "rider@example.com"},
+        json={
+            "hold_nonce": hold_json["hold_nonce"],
+            "request_nonce": nonce,
+            "contact": "rider@example.com",
+        },
     )
     assert replay.status_code == 409
 
@@ -131,7 +165,9 @@ def test_nonce_expiry_hold_expiry_and_rate_plan_pricing(tmp_path):
 
     with app.app_context():
         db = app.get_db()
-        dep_id = db.execute("SELECT id FROM departures ORDER BY id LIMIT 1").fetchone()[0]
+        dep_id = db.execute("SELECT id FROM departures ORDER BY id LIMIT 1").fetchone()[
+            0
+        ]
         departure_time = (datetime.now(UTC) + timedelta(hours=5)).isoformat()
         db.execute(
             "UPDATE departures SET departure_time=?, base_price=? WHERE id=?",
@@ -145,11 +181,15 @@ def test_nonce_expiry_hold_expiry_and_rate_plan_pricing(tmp_path):
         )
         db.commit()
 
-    hold = auth_post(client, "/api/bookings/hold", json={"departure_id": dep_id, "seats": 2})
+    hold = auth_post(
+        client, "/api/bookings/hold", json={"departure_id": dep_id, "seats": 2}
+    )
     assert hold.status_code == 200
     hold_nonce = hold.get_json()["hold_nonce"]
 
-    nonce = auth_post(client, "/api/security/nonce", data={"action": "booking_confirm"}).get_json()["nonce"]
+    nonce = auth_post(
+        client, "/api/security/nonce", data={"action": "booking_confirm"}
+    ).get_json()["nonce"]
     with app.app_context():
         app.get_db().execute(
             "UPDATE sessions_nonce SET expires_at=? WHERE nonce=?",
@@ -159,7 +199,11 @@ def test_nonce_expiry_hold_expiry_and_rate_plan_pricing(tmp_path):
     expired_nonce = auth_post(
         client,
         "/api/bookings/confirm",
-        json={"hold_nonce": hold_nonce, "request_nonce": nonce, "contact": "rider@example.com"},
+        json={
+            "hold_nonce": hold_nonce,
+            "request_nonce": nonce,
+            "contact": "rider@example.com",
+        },
     )
     assert expired_nonce.status_code == 409
 
@@ -170,20 +214,34 @@ def test_nonce_expiry_hold_expiry_and_rate_plan_pricing(tmp_path):
         )
         app.get_db().commit()
 
-    nonce2 = auth_post(client, "/api/security/nonce", data={"action": "booking_confirm"}).get_json()["nonce"]
+    nonce2 = auth_post(
+        client, "/api/security/nonce", data={"action": "booking_confirm"}
+    ).get_json()["nonce"]
     expired_hold = auth_post(
         client,
         "/api/bookings/confirm",
-        json={"hold_nonce": hold_nonce, "request_nonce": nonce2, "contact": "rider@example.com"},
+        json={
+            "hold_nonce": hold_nonce,
+            "request_nonce": nonce2,
+            "contact": "rider@example.com",
+        },
     )
     assert expired_hold.status_code == 410
 
-    fresh_hold = auth_post(client, "/api/bookings/hold", json={"departure_id": dep_id, "seats": 1})
-    fresh_nonce = auth_post(client, "/api/security/nonce", data={"action": "booking_confirm"}).get_json()["nonce"]
+    fresh_hold = auth_post(
+        client, "/api/bookings/hold", json={"departure_id": dep_id, "seats": 1}
+    )
+    fresh_nonce = auth_post(
+        client, "/api/security/nonce", data={"action": "booking_confirm"}
+    ).get_json()["nonce"]
     confirmed = auth_post(
         client,
         "/api/bookings/confirm",
-        json={"hold_nonce": fresh_hold.get_json()["hold_nonce"], "request_nonce": fresh_nonce, "contact": "rider@example.com"},
+        json={
+            "hold_nonce": fresh_hold.get_json()["hold_nonce"],
+            "request_nonce": fresh_nonce,
+            "contact": "rider@example.com",
+        },
     )
     assert confirmed.status_code == 200
     assert confirmed.get_json()["total_price"] == 25.0
@@ -197,7 +255,9 @@ def test_concurrent_holds_prevent_overbooking(tmp_path):
 
     with app.app_context():
         db = app.get_db()
-        dep_id = db.execute("SELECT id FROM departures ORDER BY id LIMIT 1").fetchone()[0]
+        dep_id = db.execute("SELECT id FROM departures ORDER BY id LIMIT 1").fetchone()[
+            0
+        ]
         db.execute(
             "UPDATE departures SET departure_time=?, total_seats=1 WHERE id=?",
             ((datetime.now(UTC) + timedelta(hours=3)).isoformat(), dep_id),
@@ -205,7 +265,9 @@ def test_concurrent_holds_prevent_overbooking(tmp_path):
         db.commit()
 
     def hold(client):
-        return auth_post(client, "/api/bookings/hold", json={"departure_id": dep_id, "seats": 1}).status_code
+        return auth_post(
+            client, "/api/bookings/hold", json={"departure_id": dep_id, "seats": 1}
+        ).status_code
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         results = list(executor.map(hold, [client_a, client_b]))
@@ -225,15 +287,27 @@ def test_login_lockout_persists_across_app_reload(tmp_path):
     client, app = build_client(tmp_path)
 
     for _ in range(5):
-        bad = client.post("/login", data={"username": "agent01", "password": "WrongPass!"}, follow_redirects=False)
+        bad = client.post(
+            "/login",
+            data={"username": "agent01", "password": "WrongPass!"},
+            follow_redirects=False,
+        )
         assert bad.status_code == 302
 
-    locked = client.post("/login", data={"username": "agent01", "password": "MetroOpsPass!01"}, follow_redirects=False)
+    locked = client.post(
+        "/login",
+        data={"username": "agent01", "password": "MetroOpsPass!01"},
+        follow_redirects=False,
+    )
     assert locked.status_code == 302
     assert "/login" in (locked.headers.get("Location") or "")
 
     with app.app_context():
-        lockout_until = app.get_db().execute("SELECT lockout_until FROM users WHERE username='agent01'").fetchone()[0]
+        lockout_until = (
+            app.get_db()
+            .execute("SELECT lockout_until FROM users WHERE username='agent01'")
+            .fetchone()[0]
+        )
         assert lockout_until
 
     module = importlib.import_module("app.app")
@@ -258,9 +332,14 @@ def test_pricing_deterministic_edge_rounding_and_discount(tmp_path):
 
     with app.app_context():
         db = app.get_db()
-        dep_id = db.execute("SELECT id FROM departures ORDER BY id LIMIT 1").fetchone()[0]
+        dep_id = db.execute("SELECT id FROM departures ORDER BY id LIMIT 1").fetchone()[
+            0
+        ]
         departure_time = (datetime.now(UTC) + timedelta(hours=6)).isoformat()
-        db.execute("UPDATE departures SET departure_time=?, base_price=? WHERE id=?", (departure_time, 10.015, dep_id))
+        db.execute(
+            "UPDATE departures SET departure_time=?, base_price=? WHERE id=?",
+            (departure_time, 10.015, dep_id),
+        )
         db.execute("DELETE FROM rate_plans")
         dep_date = datetime.fromisoformat(departure_time).date().isoformat()
         db.execute(
@@ -269,12 +348,20 @@ def test_pricing_deterministic_edge_rounding_and_discount(tmp_path):
         )
         db.commit()
 
-    hold = auth_post(client, "/api/bookings/hold", json={"departure_id": dep_id, "seats": 1})
-    nonce = auth_post(client, "/api/security/nonce", data={"action": "booking_confirm"}).get_json()["nonce"]
+    hold = auth_post(
+        client, "/api/bookings/hold", json={"departure_id": dep_id, "seats": 1}
+    )
+    nonce = auth_post(
+        client, "/api/security/nonce", data={"action": "booking_confirm"}
+    ).get_json()["nonce"]
     confirm = auth_post(
         client,
         "/api/bookings/confirm",
-        json={"hold_nonce": hold.get_json()["hold_nonce"], "request_nonce": nonce, "contact": "edge@test.local"},
+        json={
+            "hold_nonce": hold.get_json()["hold_nonce"],
+            "request_nonce": nonce,
+            "contact": "edge@test.local",
+        },
     )
     assert confirm.status_code == 200
     assert confirm.get_json()["total_price"] == 10.0

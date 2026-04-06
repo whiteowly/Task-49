@@ -30,6 +30,29 @@ CREATE TABLE IF NOT EXISTS users (
     face_identifier_encrypted BLOB,
     created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS organizations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT UNIQUE NOT NULL,
+    created_by INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(created_by) REFERENCES users(id)
+);
+CREATE TABLE IF NOT EXISTS organization_role_assignments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    organization_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    role TEXT NOT NULL CHECK(role IN ('employee','supervisor','hr','admin')),
+    status TEXT NOT NULL CHECK(status IN ('active','revoked')),
+    assigned_by INTEGER NOT NULL,
+    assigned_at TEXT NOT NULL,
+    revoked_by INTEGER,
+    revoked_at TEXT,
+    UNIQUE(organization_id, user_id),
+    FOREIGN KEY(organization_id) REFERENCES organizations(id),
+    FOREIGN KEY(user_id) REFERENCES users(id),
+    FOREIGN KEY(assigned_by) REFERENCES users(id),
+    FOREIGN KEY(revoked_by) REFERENCES users(id)
+);
 CREATE TABLE IF NOT EXISTS permissions (
     role TEXT NOT NULL,
     permission TEXT NOT NULL,
@@ -86,6 +109,20 @@ CREATE TABLE IF NOT EXISTS config_audit_log (
     changed_by INTEGER NOT NULL,
     changed_at TEXT NOT NULL,
     reason TEXT
+);
+CREATE TABLE IF NOT EXISTS admin_audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    action TEXT NOT NULL,
+    actor_user_id INTEGER NOT NULL,
+    organization_id INTEGER,
+    target_user_id INTEGER,
+    metadata TEXT,
+    before_data TEXT,
+    after_data TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(actor_user_id) REFERENCES users(id),
+    FOREIGN KEY(organization_id) REFERENCES organizations(id),
+    FOREIGN KEY(target_user_id) REFERENCES users(id)
 );
 CREATE TABLE IF NOT EXISTS routes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -299,7 +336,9 @@ CREATE TABLE IF NOT EXISTS ranking_samples (
 def _ensure_migrations(db):
     user_cols = {row[1] for row in db.execute("PRAGMA table_info(users)").fetchall()}
     if "failed_attempts" not in user_cols:
-        db.execute("ALTER TABLE users ADD COLUMN failed_attempts INTEGER NOT NULL DEFAULT 0")
+        db.execute(
+            "ALTER TABLE users ADD COLUMN failed_attempts INTEGER NOT NULL DEFAULT 0"
+        )
     if "lockout_until" not in user_cols:
         db.execute("ALTER TABLE users ADD COLUMN lockout_until TEXT")
     db.execute(
@@ -348,6 +387,55 @@ def _ensure_migrations(db):
     )
     db.execute(
         """
+        CREATE TABLE IF NOT EXISTS organizations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE NOT NULL,
+            created_by INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(created_by) REFERENCES users(id)
+        )
+        """
+    )
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS organization_role_assignments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            organization_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            role TEXT NOT NULL CHECK(role IN ('employee','supervisor','hr','admin')),
+            status TEXT NOT NULL CHECK(status IN ('active','revoked')),
+            assigned_by INTEGER NOT NULL,
+            assigned_at TEXT NOT NULL,
+            revoked_by INTEGER,
+            revoked_at TEXT,
+            UNIQUE(organization_id, user_id),
+            FOREIGN KEY(organization_id) REFERENCES organizations(id),
+            FOREIGN KEY(user_id) REFERENCES users(id),
+            FOREIGN KEY(assigned_by) REFERENCES users(id),
+            FOREIGN KEY(revoked_by) REFERENCES users(id)
+        )
+        """
+    )
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS admin_audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            action TEXT NOT NULL,
+            actor_user_id INTEGER NOT NULL,
+            organization_id INTEGER,
+            target_user_id INTEGER,
+            metadata TEXT,
+            before_data TEXT,
+            after_data TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(actor_user_id) REFERENCES users(id),
+            FOREIGN KEY(organization_id) REFERENCES organizations(id),
+            FOREIGN KEY(target_user_id) REFERENCES users(id)
+        )
+        """
+    )
+    db.execute(
+        """
         CREATE TABLE IF NOT EXISTS experiment_audit_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             experiment_id INTEGER NOT NULL,
@@ -384,14 +472,24 @@ def _ensure_migrations(db):
         WHERE depot_scope IS NULL
         """
     )
-    experiment_cols = {row[1] for row in db.execute("PRAGMA table_info(experiments)").fetchall()}
+    experiment_cols = {
+        row[1] for row in db.execute("PRAGMA table_info(experiments)").fetchall()
+    }
     if "split_a_percent" not in experiment_cols:
-        db.execute("ALTER TABLE experiments ADD COLUMN split_a_percent INTEGER NOT NULL DEFAULT 50")
-    db.execute("UPDATE experiments SET split_a_percent=50 WHERE split_a_percent IS NULL")
-    seat_hold_cols = {row[1] for row in db.execute("PRAGMA table_info(seat_holds)").fetchall()}
+        db.execute(
+            "ALTER TABLE experiments ADD COLUMN split_a_percent INTEGER NOT NULL DEFAULT 50"
+        )
+    db.execute(
+        "UPDATE experiments SET split_a_percent=50 WHERE split_a_percent IS NULL"
+    )
+    seat_hold_cols = {
+        row[1] for row in db.execute("PRAGMA table_info(seat_holds)").fetchall()
+    }
     if "kiosk_session_id" not in seat_hold_cols:
         db.execute("ALTER TABLE seat_holds ADD COLUMN kiosk_session_id TEXT")
-    booking_cols = {row[1] for row in db.execute("PRAGMA table_info(bookings)").fetchall()}
+    booking_cols = {
+        row[1] for row in db.execute("PRAGMA table_info(bookings)").fetchall()
+    }
     if "kiosk_session_id" not in booking_cols:
         db.execute("ALTER TABLE bookings ADD COLUMN kiosk_session_id TEXT")
     default_rules = [
@@ -459,14 +557,26 @@ def initialize_database(db_path, utc_now, to_iso):
         now_iso = to_iso(utc_now())
         if development_mode:
             users = [
-                ("agent01", generate_password_hash("MetroOpsPass!01"), "employee", "Main Depot"),
-                ("supervisor01", generate_password_hash("MetroOpsPass!02"), "supervisor", "Main Depot"),
+                (
+                    "agent01",
+                    generate_password_hash("MetroOpsPass!01"),
+                    "employee",
+                    "Main Depot",
+                ),
+                (
+                    "supervisor01",
+                    generate_password_hash("MetroOpsPass!02"),
+                    "supervisor",
+                    "Main Depot",
+                ),
                 ("hr01", generate_password_hash("MetroOpsPass!03"), "hr", "HQ"),
                 ("admin01", generate_password_hash("MetroOpsPass!04"), "admin", "HQ"),
             ]
             bootstrap_profile = "dev_defaults_v1"
         else:
-            admin_username = (os.environ.get("METROOPS_BOOTSTRAP_ADMIN_USERNAME") or "admin").strip()
+            admin_username = (
+                os.environ.get("METROOPS_BOOTSTRAP_ADMIN_USERNAME") or "admin"
+            ).strip()
             admin_password = os.environ.get("METROOPS_BOOTSTRAP_ADMIN_PASSWORD") or ""
             if len(admin_password) < 12:
                 raise RuntimeError(
@@ -485,9 +595,15 @@ def initialize_database(db_path, utc_now, to_iso):
             ("bootstrap_profile", bootstrap_profile),
         )
 
-        db.execute("INSERT INTO routes (code,origin,destination) VALUES ('R-101','Central','North Yard')")
-        db.execute("INSERT INTO routes (code,origin,destination) VALUES ('R-202','Central','West Loop')")
-        route_ids = [r[0] for r in db.execute("SELECT id FROM routes ORDER BY id").fetchall()]
+        db.execute(
+            "INSERT INTO routes (code,origin,destination) VALUES ('R-101','Central','North Yard')"
+        )
+        db.execute(
+            "INSERT INTO routes (code,origin,destination) VALUES ('R-202','Central','West Loop')"
+        )
+        route_ids = [
+            r[0] for r in db.execute("SELECT id FROM routes ORDER BY id").fetchall()
+        ]
         now = utc_now()
         for idx, route_id in enumerate(route_ids):
             for hop in range(1, 5):
@@ -507,8 +623,13 @@ def initialize_database(db_path, utc_now, to_iso):
             "INSERT INTO rate_plans (name,start_date,end_date,amount_delta) VALUES ('Peak Surcharge','2026-01-01','2026-12-31',4.5)"
         )
         db.execute("INSERT INTO warehouses (name) VALUES ('Main Depot')")
-        warehouse_id = db.execute("SELECT id FROM warehouses WHERE name='Main Depot'").fetchone()[0]
-        db.execute("INSERT INTO zones (warehouse_id,name) VALUES (?,?)", (warehouse_id, "Zone A"))
+        warehouse_id = db.execute(
+            "SELECT id FROM warehouses WHERE name='Main Depot'"
+        ).fetchone()[0]
+        db.execute(
+            "INSERT INTO zones (warehouse_id,name) VALUES (?,?)",
+            (warehouse_id, "Zone A"),
+        )
         zone_id = db.execute("SELECT id FROM zones WHERE name='Zone A'").fetchone()[0]
         db.execute(
             "INSERT INTO bins (zone_id,code,bin_type,capacity_cuft,capacity_lb,status) VALUES (?,?,?,?,?,?)",
@@ -524,7 +645,9 @@ def initialize_database(db_path, utc_now, to_iso):
             [(role, p) for p in perms],
         )
     if not development_mode:
-        profile = db.execute("SELECT value FROM system_config WHERE key='bootstrap_profile'").fetchone()
+        profile = db.execute(
+            "SELECT value FROM system_config WHERE key='bootstrap_profile'"
+        ).fetchone()
         if profile and profile["value"] == "dev_defaults_v1":
             raise RuntimeError(
                 "Development default credentials detected in non-development runtime. Reinitialize DB with secure bootstrap credentials."
